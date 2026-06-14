@@ -102,6 +102,8 @@
       { id:"alon", name:"אלון", bday:"20-04", byear:2014 },
       { id:"asaf", name:"אסף", bday:"08-05", byear:2016 },
     ];
+    const TEST_KID = { id:"__test__", name:"🧪 בדיקה", bday:"01-01", byear:2000, isTest:true };
+    const isTestId=(id)=>id===TEST_KID.id;
     const CREATURES = [
       { id:"squirrel", emoji:"🐿️", name:"סנאי", trait:"אוגר לחורף" },
       { id:"ant", emoji:"🐜", name:"נמלה", trait:"חרוצה וחסכנית" },
@@ -137,8 +139,8 @@
       return Math.max(sum, p.balance||0, p.milestoneReached||0); }
     const WINS_STEP=20, WINS_BONUS=20;
     const fmt=(n)=>"₪"+Number(n||0).toLocaleString("he-IL");
-    const nameOf=(id)=> id==="parent" ? "הורה" : ((KIDS.find(k=>k.id===id)||{}).name||"");
-    const defaultCode=(id)=>{ const k=KIDS.find(x=>x.id===id); return k?String(k.byear):""; };
+    const nameOf=(id)=> id==="parent" ? "הורה" : (isTestId(id) ? TEST_KID.name : ((KIDS.find(k=>k.id===id)||{}).name||""));
+    const defaultCode=(id)=>{ if(isTestId(id)) return String(TEST_KID.byear); const k=KIDS.find(x=>x.id===id); return k?String(k.byear):""; };
     const norm=(s)=>String(s||"").trim().replace(/\s+/g," ").toLowerCase();
 
     function awardMilestones(p,deposit){ // deposit = סכום שהופקד עכשיו (אם undefined — לא מוסיפים לצבירה)
@@ -242,6 +244,8 @@
       const [mbKid,setMbKid]=useState({}); const [mbAmt,setMbAmt]=useState({}); const [mbErr,setMbErr]=useState({});
       const [preview,setPreview]=useState(null); const [pvAns,setPvAns]=useState(""); const [pvResult,setPvResult]=useState(null);
       const [txOpen,setTxOpen]=useState({});
+      const [testMode,setTestMode]=useState(false);
+      const [resetFor,setResetFor]=useState(null); const [resetBal,setResetBal]=useState(""); const [resetDep,setResetDep]=useState("");
       const timeLabel=(s)=>{ s=s||60; if(s%60===0){const m=s/60; return m===1?"דקה":m+" דקות";} return s+" שניות"; };
       const didMaint=useRef(false); const activeRef=useRef(null); const prevBal=useRef({}); const fileRef=useRef(null); const chFileRef=useRef(null);
       const pendingRef=useRef(null); const settingsRef=useRef({});
@@ -276,7 +280,10 @@
       function getProfile(id,src){ src=src||profiles; return {...blank(),...(src[id]||{})}; }
       function writeProfile(id,p){ setProfiles(prev=>({...prev,[id]:p})); window.FB&&window.FB.saveProfile(id,p); }
       function writeSettings(s){ setSettings(s); settingsRef.current=s; window.FB&&window.FB.saveSettings(s); }
-      function addNotif(s,text,to){ const n={id:"N"+Date.now()+Math.random().toString(16).slice(2,6), text, date:Date.now(), to:(to||"all")};
+      function addNotif(s,text,to){
+        // התראות שקשורות אך ורק למשתמש הבדיקה לא נשמרות כלל — אין תיעוד לילדים
+        if(Array.isArray(to) && to.length>0 && to.every(isTestId)) return s;
+        const n={id:"N"+Date.now()+Math.random().toString(16).slice(2,6), text, date:Date.now(), to:(to||"all")};
         return {...s, notifs:[n,...(s.notifs||[])].slice(0,60)}; }
       function canSee(n){ if(!n.to||n.to==="all") return true; if(owner==="parent") return true; return Array.isArray(n.to)&&!!owner&&n.to.includes(owner); }
       function claimOwner(id){ requireUnlock(id, ()=>{ setOwner(id); try{ localStorage.setItem("hs_owner",id); }catch(e){} }); }
@@ -295,7 +302,7 @@
       function runMaintenance(prof, sett){ const dm=todayDM(); const year=new Date().getFullYear(); const now=Date.now();
         const curSun=sundayKey(); let s={...(sett||{})}; let sChanged=false;
         const paid={}; const bal={};
-        for(const kid of KIDS){ const cur=prof[kid.id]; let p={...blank(),...(cur||{})};
+        for(const kid of KIDS){ if(kid.isTest) continue; const cur=prof[kid.id]; let p={...blank(),...(cur||{})};
           if(cur){ let changed=false;
             const gift=(p.bdayGift==null?DEFAULT_GIFT:p.bdayGift);
             let runDep=0; let ranMilestone=false;
@@ -431,6 +438,38 @@
         writeChallenges(list,"🏁 אתגר הסתיים"); }
       function deleteChallenge(id){ const all = settings.challenges || (settings.challenge?[settings.challenge]:[]);
         writeChallenges(all.filter(c=>c.id!==id)); }
+      function applyAccountReset(){ const id=resetFor; if(!id) return;
+        const bal=parseFloat(resetBal); const dep=resetDep.trim()===""?(isNaN(bal)?0:bal):parseFloat(resetDep);
+        if(isNaN(bal)||bal<0) { setErr("יתרה לא תקינה"); return; }
+        if(isNaN(dep)||dep<0) { setErr("צבירה לא תקינה"); return; }
+        const p=getProfile(id);
+        const np={...p, balance:bal, totalDeposited:dep, depositMilestone:Math.min(1000,Math.floor(dep/100)*100),
+          challengeWins:p.challengeWins||0,
+          tx:[{t:"add",amount:bal,reason:"🧹 איפוס חשבון — יתרת פתיחה",date:Date.now()}] };
+        // הסרת הלוואות שקשורות לילד הזה (משני הצדדים) כדי שלא יישארו חובות תלויים
+        const nl=(settings.loans||[]).filter(l=>l.from!==id && l.to!==id);
+        writeProfile(id,np);
+        writeSettings(addNotif({...settings,loans:nl},"🧹 חשבון "+nameOf(id)+" אופס ליתרה "+fmt(bal),[id]));
+        setResetFor(null); setResetBal(""); setResetDep(""); setErr(""); }
+      function stornoTx(id,idx){
+        const p=getProfile(id); const tx=p.tx||[]; const t=tx[idx]; if(!t) return;
+        if(!window.confirm("לבטל את התנועה: "+t.reason+" ("+(t.t==="add"?"+":t.t==="cash"?"":"−")+fmt(t.amount)+")?")) return;
+        let np={...p}; let balDelta=0;
+        // תיקון יתרה: ביטול ההשפעה של התנועה
+        if(t.t==="add") balDelta=-t.amount;        // הייתה תוספת → מורידים
+        else if(t.t==="spend") balDelta=+t.amount;  // הייתה הורדה → מחזירים
+        // "cash" = רישום בלבד, לא השפיע על היתרה → balDelta=0
+        np.balance=Math.max(0,(p.balance||0)+balDelta);
+        // תיקון צבירה: רק אם התנועה נספרה בצבירה (הפקדה חיצונית או בונוס חיסכון)
+        if(t.t==="add"){
+          const td=(p.totalDeposited==null?computeDeposited(p):p.totalDeposited);
+          const counted = isDepositReason(t.reason) || t.reason.indexOf("🎯 בונוס חיסכון")===0;
+          if(counted){ const ntd=Math.max(0,td-t.amount); np.totalDeposited=ntd; np.depositMilestone=Math.min(1000,Math.floor(ntd/100)*100); }
+          else { np.totalDeposited=td; }
+        }
+        np.tx=tx.filter((_,i)=>i!==idx);
+        writeProfile(id,np);
+        writeSettings(addNotif(settings,"↩️ ההורה ביטל תנועה אצל "+nameOf(id)+": "+t.reason,[id])); }
       function resetAllWins(){
         if(!window.confirm("לאפס לכל הילדים את מונה התשובות הנכונות? (היתרות לא נפגעות)")) return;
         for(const k of KIDS){ const p=getProfile(k.id);
@@ -471,7 +510,12 @@
       function finishChallenge(ans){ const cur=chCur; setChOpen(false); if(!cur) return;
         const all = settingsRef.current.challenges || (settingsRef.current.challenge?[settingsRef.current.challenge]:[]);
         const ch = all.find(c=>c.id===cur.id);
-        if(!ch||!ch.active||(ch.attempts&&ch.attempts[activeId])){ setChCur(null); return; }
+        if(!ch||!ch.active){ setChCur(null); return; }
+        const stored0=norm(ch.a); const short0=norm(String(ch.a).split("(")[0]);
+        // משתמש בדיקה: מציגים תוצאה אך לא שומרים כלום (לא ניסיון, לא יתרה, לא התראה)
+        if(isTestId(activeId)){ const okT=norm(ans)===stored0 || (!!short0 && norm(ans)===short0);
+          setChResult({ok:okT, correct:ch.a, exp:ch.exp||"", bonus:ch.bonus, wins:0}); setChCur(null); return; }
+        if(ch.attempts&&ch.attempts[activeId]){ setChCur(null); return; }
         const stored=norm(ch.a); const short=norm(String(ch.a).split("(")[0]);
         const ok = norm(ans)===stored || (!!short && norm(ans)===short); const name=nameOf(activeId);
         const list = all.map(c=> c.id===ch.id ? {...c, attempts:{...(c.attempts||{}),[activeId]:{ok,ts:Date.now(),ans:String(ans||"").trim()}}} : c);
@@ -514,8 +558,8 @@
           </header>
           {!loaded ? <div className="text-center text-emerald-700 font-semibold py-20">מתחבר…</div> : (
             <div className="mx-auto grid max-w-3xl grid-cols-2 gap-4 sm:grid-cols-3">
-              {KIDS.map(kid=>{ const p=getProfile(kid.id); const {lv}=levelOf(p.balance); const d=debtOf(kid.id);
-                return (<button key={kid.id} onClick={()=>{setActiveId(kid.id);setView("child");}} className="group relative flex flex-col items-center rounded-3xl border-2 border-emerald-100 bg-white/80 p-5 shadow-sm backdrop-blur transition hover:-translate-y-1 hover:border-amber-300 hover:shadow-lg">
+              {(testMode?[...KIDS,TEST_KID]:KIDS).map(kid=>{ const p=getProfile(kid.id); const {lv}=levelOf(p.balance); const d=debtOf(kid.id);
+                return (<button key={kid.id} onClick={()=>{setActiveId(kid.id);setView("child");}} className={"group relative flex flex-col items-center rounded-3xl border-2 p-5 shadow-sm backdrop-blur transition hover:-translate-y-1 hover:border-amber-300 hover:shadow-lg "+(kid.isTest?"border-amber-300 bg-amber-50/70":"border-emerald-100 bg-white/80")}>
                   {(p.creature||p.photo) && <span className="absolute left-3 top-3 z-10 rounded-full bg-emerald-900 px-2 py-0.5 text-[10px] font-bold text-white">רמה {lv}</span>}
                   {(()=>{ const open=challenges.filter(c=>!(c.attempts||{})[kid.id]).length; return open>0 ? <span className="absolute right-3 top-3 z-10 flex items-center gap-0.5 rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold text-emerald-950">🎯{open>1?open:""}</span> : null; })()}
                   <Avatar profile={p} level={lv} box={76} emojiCls="text-4xl" ring={true}/>
@@ -581,7 +625,12 @@
         {view==="parent" && (<div className="mx-auto max-w-2xl">
           <button onClick={()=>setView("home")} className="mb-4 text-emerald-700 font-bold">← חזרה</button>
           <h2 className="mb-1 text-2xl font-black text-emerald-900">מצב הורה</h2>
-          <p className="mb-4 text-sm text-emerald-600">דמי הכיס מתווספים ליתרה אוטומטית כל יום ראשון. "מזומן" = רישום בלבד, לא משנה יתרה.</p>
+          <p className="mb-3 text-sm text-emerald-600">דמי הכיס מתווספים ליתרה אוטומטית כל יום ראשון. "מזומן" = רישום בלבד, לא משנה יתרה.</p>
+          <div className="mb-4 flex items-center justify-between rounded-2xl border-2 border-amber-200 bg-amber-50/60 p-3">
+            <div className="text-sm font-bold text-amber-700">🧪 משתמש בדיקה {testMode?"(פעיל)":""}</div>
+            <button onClick={()=>setTestMode(v=>!v)} className={"rounded-xl px-4 py-2 text-xs font-bold "+(testMode?"bg-rose-600 text-white hover:bg-rose-500":"bg-emerald-900 text-white hover:bg-emerald-800")}>{testMode?"הסתר ממסך הבית":"הצג במסך הבית"}</button>
+          </div>
+          {testMode && <div className="mb-4 rounded-xl bg-amber-50 px-3 py-2 text-[11px] text-amber-700">משתמש "🧪 בדיקה" יופיע במסך הבית (רק כל עוד מצב זה פעיל). אפשר להיכנס אליו ולבדוק הכל — יתרה, אתגרים, פעולות — בלי שזה ייצור התראות או תיעוד אצל הילדים. קוד כניסה: 2000.</div>}
           <div className="space-y-3">
             {KIDS.map(kid=>{ const p=getProfile(kid.id); const {lv}=levelOf(p.balance);
               return (<div key={kid.id} className="rounded-2xl border-2 border-emerald-100 bg-white/85 p-4 shadow-sm">
@@ -608,7 +657,7 @@
                   {(!p.tx||p.tx.length===0)?<div className="text-xs text-emerald-500">אין תנועות</div>:
                     (<ul className="space-y-1">{p.tx.map((t,i)=>(<li key={i} className="flex items-center justify-between gap-2 border-b border-emerald-50 pb-1 last:border-0">
                       <span className="text-xs text-emerald-800">{t.reason}</span>
-                      <span className="flex items-center gap-1 whitespace-nowrap"><span className={"text-xs font-bold "+(t.t==="add"?"text-emerald-600":t.t==="cash"?"text-amber-500":"text-rose-500")}>{t.t==="add"?"+":t.t==="cash"?"":"−"}{fmt(t.amount)}</span><span className="text-[10px] text-emerald-400">{new Date(t.date).toLocaleDateString("he-IL",{day:"2-digit",month:"2-digit"})}</span></span>
+                      <span className="flex items-center gap-1 whitespace-nowrap"><button onClick={()=>stornoTx(kid.id,i)} title="בטל תנועה (סטורנו)" className="rounded border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-rose-500 hover:bg-rose-100">↩️ בטל</button><span className={"text-xs font-bold "+(t.t==="add"?"text-emerald-600":t.t==="cash"?"text-amber-500":"text-rose-500")}>{t.t==="add"?"+":t.t==="cash"?"":"−"}{fmt(t.amount)}</span><span className="text-[10px] text-emerald-400">{new Date(t.date).toLocaleDateString("he-IL",{day:"2-digit",month:"2-digit"})}</span></span>
                     </li>))}</ul>)}
                 </div>)}
               </div>); })}
