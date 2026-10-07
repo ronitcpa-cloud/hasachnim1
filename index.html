@@ -85,8 +85,8 @@
     }, (e) => console.error("Firestore:", e));
     window.FB = {
       setCb(fn){ cb = fn; },
-      async saveProfile(id, p){ try { await setDoc(ref, { profiles: { [id]: p } }, { merge: true }); } catch(e){ console.error(e); } },
-      async saveSettings(s){ try { await setDoc(ref, { settings: s }, { merge: true }); } catch(e){ console.error(e); } },
+      async saveProfile(id, p){ try { await setDoc(ref, { profiles: { [id]: p } }, { merge: true }); } catch(e){ console.error(e); window.dispatchEvent(new CustomEvent("fberror",{detail:String(e&&e.message||e)})); } },
+      async saveSettings(s){ try { await setDoc(ref, { settings: s }, { merge: true }); } catch(e){ console.error(e); window.dispatchEvent(new CustomEvent("fberror",{detail:String(e&&e.message||e)})); } },
     };
     if (window.__onFB) window.__onFB(window.FB);
     window.dispatchEvent(new Event("fbready"));
@@ -150,18 +150,20 @@
     const norm=(s)=>String(s||"").trim().replace(/\s+/g," ").toLowerCase();
 
     function awardMilestones(p,deposit){ // deposit = סכום שהופקד עכשיו (אם undefined — לא מוסיפים לצבירה)
-      if(p.totalDeposited==null){ p.totalDeposited=computeDeposited(p); // אתחול חד-פעמי מההיסטוריה
-        if(!p.depositMilestone){ p.depositMilestone=Math.min(1000,Math.floor(p.totalDeposited/100)*100); } } // היעדים שכבר עברו לא משולמים שוב
-      if(typeof deposit==="number" && deposit>0) p.totalDeposited+=deposit;
+      const dep=(typeof deposit==="number" && deposit>0)?deposit:0;
+      if(p.totalDeposited==null){ // אתחול חד-פעמי מההיסטוריה — התנועה הנוכחית כבר ביומן, לא סופרים אותה פעמיים
+        p.totalDeposited=computeDeposited(p); const base=Math.max(0,p.totalDeposited-dep);
+        if(!p.depositMilestone){ p.depositMilestone=Math.min(1000,Math.floor(base/100)*100); } } // היעדים שכבר עברו לא משולמים שוב
+      else if(dep>0) p.totalDeposited+=dep;
       let m=p.depositMilestone||0; let ch=false;
       while(m<1000 && p.totalDeposited>=m+100){ m+=100; const b=m/10; p.balance+=b; p.totalDeposited+=b;
         p.tx=[{t:"add",amount:b,reason:"🎯 בונוס חיסכון ל-"+m+"₪ שנצברו",dep:true,date:Date.now()},...(p.tx||[])]; ch=true; }
       p.depositMilestone=m; return ch; }
 
-    function awardWinsBonus(p){ const wins=p.challengeWins||0; let paid=p.challengeBonusPaid||0; let got=false;
+    function awardWinsBonus(p){ const wins=p.challengeWins||0; let paid=p.challengeBonusPaid||0; let got=0;
       while(paid+WINS_STEP<=wins){ paid+=WINS_STEP; p.balance+=WINS_BONUS;
-        p.tx=[{t:"add",amount:WINS_BONUS,reason:"🏅 בונוס "+paid+" תשובות נכונות!",date:Date.now()},...(p.tx||[])]; got=true; }
-      p.challengeBonusPaid=paid; return got; }
+        p.tx=[{t:"add",amount:WINS_BONUS,reason:"🏅 בונוס "+paid+" תשובות נכונות!",dep:true,date:Date.now()},...(p.tx||[])]; got+=WINS_BONUS; }
+      p.challengeBonusPaid=paid; return got; } // מחזיר את הסכום ששולם (0 = לא שולם)
 
     function fireConfetti(coins){ const layer=document.getElementById("fx"); if(!layer) return;
       const set=coins?["🪙","💰","✨"]:["🎉","✨","⭐","🪙","🎊"]; const n=coins?16:30;
@@ -256,7 +258,11 @@
       const [fixDepFor,setFixDepFor]=useState(null);
       const timeLabel=(s)=>{ s=s||60; if(s%60===0){const m=s/60; return m===1?"דקה":m+" דקות";} return s+" שניות"; };
       const didMaint=useRef(false); const activeRef=useRef(null); const prevBal=useRef({}); const fileRef=useRef(null); const chFileRef=useRef(null); const chJsonRef=useRef(null);
-      const pendingRef=useRef(null); const settingsRef=useRef({});
+      const pendingRef=useRef(null); const settingsRef=useRef({}); const profilesRef=useRef({}); const maintDayRef=useRef("");
+      const [chHint,setChHint]=useState(""); const [chHintCost,setChHintCost]=useState(""); const [chKidHints,setChKidHints]=useState({});
+      const [hintShown,setHintShown]=useState({}); const [hintErr,setHintErr]=useState(""); const [pvHint,setPvHint]=useState({});
+      const [saveErr,setSaveErr]=useState("");
+      useEffect(()=>{ const f=(e)=>setSaveErr("⚠️ השמירה בענן נכשלה — ייתכן שהשינוי האחרון לא נשמר. ("+(e.detail||"")+")"); window.addEventListener("fberror",f); return ()=>window.removeEventListener("fberror",f); },[]);
       useEffect(()=>{ activeRef.current=(view==="child")?activeId:null; },[activeId,view]);
       useEffect(()=>{ settingsRef.current=settings; },[settings]);
       useEffect(()=>{ document.documentElement.setAttribute("data-theme",theme); try{ localStorage.setItem("hs_theme",theme); }catch(e){} },[theme]);
@@ -266,14 +272,17 @@
           if(aid){ const nb=((d.profiles[aid]||{}).balance)||0; const ob=prevBal.current[aid];
             if(ob!==undefined && nb>ob){ fireConfetti(true); if(levelOf(nb).lv>levelOf(ob).lv){ setCelebrate("עלית לרמה "+levelOf(nb).lv+"!"); fireConfetti(false); setTimeout(()=>setCelebrate(null),2600); } } }
           const pb={}; for(const k of KIDS){ pb[k.id]=((d.profiles[k.id]||{}).balance)||0; } prevBal.current=pb;
-          setProfiles(d.profiles); setSettings(d.settings); settingsRef.current=d.settings; setLoaded(true);
-          if(!didMaint.current){ didMaint.current=true; runMaintenance(d.profiles, d.settings); }
+          profilesRef.current=d.profiles; setProfiles(d.profiles); setSettings(d.settings); settingsRef.current=d.settings; setLoaded(true);
+          if(!didMaint.current){ didMaint.current=true; maintDayRef.current=todayDM(); runMaintenance(d.profiles, d.settings); }
         }
         function attach(fb){ fb.setCb(handle); }
         if(window.FB) attach(window.FB);
         else { window.__onFB=attach; window.addEventListener("fbready",()=>window.FB&&attach(window.FB),{once:true}); }
       },[]);
 
+      useEffect(()=>{ function onVis(){ if(document.visibilityState!=="visible" || !didMaint.current) return;
+          if(maintDayRef.current!==todayDM()){ maintDayRef.current=todayDM(); runMaintenance(profilesRef.current, settingsRef.current); } }
+        document.addEventListener("visibilitychange",onVis); return ()=>document.removeEventListener("visibilitychange",onVis); },[]);
       const loans = settings.loans || [];
       const notifs = settings.notifs || [];
       const challenges = (settings.challenges || (settings.challenge ? [settings.challenge] : [])).filter(c=>c&&c.active);
@@ -285,8 +294,8 @@
         else navigator.clearAppBadge().catch(()=>{}); } }catch(e){} },[unread]);
       const creatureOf=(id)=>CREATURES.find(c=>c.id===id);
       const codeOf=(id)=> id==="parent" ? PARENT_CODE : (((settings.codes||{})[id]) || defaultCode(id));
-      function getProfile(id,src){ src=src||profiles; return {...blank(),...(src[id]||{})}; }
-      function writeProfile(id,p){ setProfiles(prev=>({...prev,[id]:p})); window.FB&&window.FB.saveProfile(id,p); }
+      function getProfile(id,src){ src=src||profilesRef.current||profiles; return {...blank(),...(src[id]||{})}; }
+      function writeProfile(id,p){ profilesRef.current={...profilesRef.current,[id]:p}; setProfiles(prev=>({...prev,[id]:p})); window.FB&&window.FB.saveProfile(id,p); }
       function writeSettings(s){ setSettings(s); settingsRef.current=s; window.FB&&window.FB.saveSettings(s); }
       function addNotif(s,text,to){
         // התראות שקשורות אך ורק למשתמש הבדיקה לא נשמרות כלל — אין תיעוד לילדים
@@ -327,7 +336,7 @@
               ranMilestone=true; if(awardMilestones(p,runDep)){ s=addNotif(s,"🎯 "+kid.name+" קיבל/ה בונוס יעד חיסכון!"); sChanged=true; }
               if(levelOf(p.balance).lv>levelOf(oldBal).lv){ s=withLevelNotif(s,kid.name,oldBal,p.balance); sChanged=true; } }
             if(runDep>0 && !ranMilestone){ if(awardMilestones(p,runDep)){ s=addNotif(s,"🎯 "+kid.name+" קיבל/ה בונוס יעד חיסכון!"); sChanged=true; } }
-            if(changed) window.FB&&window.FB.saveProfile(kid.id,p); }
+            if(changed) writeProfile(kid.id,p); }
           bal[kid.id]=p.balance; }
         if(Object.keys(paid).length>0){
           const line=KIDS.map(k=>k.name+(paid[k.id]?" +"+fmt(paid[k.id]):"")+" (יתרה "+fmt(bal[k.id])+")").join(" · ");
@@ -423,8 +432,13 @@
 
       function writeChallenges(list,note,toAll){ let s={...settings, challenges:list}; if(settings.challenge) s={...s, challenge:null};
         if(note) s=addNotif(s,note); writeSettings(s); }
+      function clearChForm(){ setChQ(""); setChA(""); setChBonus(""); setChExp(""); setChTimeSec(""); setChImg(""); setChHint(""); setChHintCost(""); setChKidHints({}); }
+      function hintFields(){ const kh={}; for(const k of KIDS){ const v=String(chKidHints[k.id]||"").trim(); if(v) kh[k.id]=v; }
+        const h=chHint.trim(); const c=chHintCost.trim()===""?(h?5:0):parseFloat(chHintCost);
+        return {hint:h, hintCost:(isNaN(c)||c<0)?-1:c, kidHints:kh}; }
       function publishChallenge(){ setErr("");
-        const b=parseFloat(chBonus);
+        const b=parseFloat(chBonus); const hf=hintFields();
+        if(hf.hintCost<0) return setErr("מחיר רמז לא תקין");
         if(!chQ.trim()) return setErr("נא להזין שאלה");
         if(!chA.trim()) return setErr("נא להזין תשובה");
         if(!b||b<=0) return setErr("נא להזין בונוס תקין");
@@ -432,14 +446,14 @@
         if(!t||t<=0||t>3600) return setErr("זמן לא תקין (1 עד 3600 שניות)");
         const all = settings.challenges || (settings.challenge?[settings.challenge]:[]);
         if(editId){
-          const list = all.map(c=> c.id===editId ? {...c,q:chQ.trim(),a:chA.trim(),exp:chExp.trim(),bonus:b,timeSec:t,img:chImg||"",active:true,attempts:{}} : c);
+          const list = all.map(c=> c.id===editId ? {...c,q:chQ.trim(),a:chA.trim(),exp:chExp.trim(),bonus:b,timeSec:t,img:chImg||"",...hf,active:true,attempts:{},hintsUsed:{}} : c);
           writeChallenges(list,"✏️ אתגר עודכן! נסו שוב — בונוס "+fmt(b));
-          setEditId(null); setChQ(""); setChA(""); setChBonus(""); setChExp(""); setChTimeSec(""); setChImg(""); return; }
-        const ch={id:"C"+Date.now()+Math.random().toString(16).slice(2,5),q:chQ.trim(),a:chA.trim(),exp:chExp.trim(),bonus:b,timeSec:t,img:chImg||"",active:true,attempts:{}};
+          setEditId(null); clearChForm(); return; }
+        const ch={id:"C"+Date.now()+Math.random().toString(16).slice(2,5),q:chQ.trim(),a:chA.trim(),exp:chExp.trim(),bonus:b,timeSec:t,img:chImg||"",...hf,active:true,attempts:{},hintsUsed:{}};
         writeChallenges([...all,ch],"🎯 אתגר חדש פורסם! בונוס "+fmt(b)+" — היכנסו לאזור האישי");
-        setChQ(""); setChA(""); setChBonus(""); setChExp(""); setChTimeSec(""); setChImg(""); }
-      function startEdit(ch){ setErr(""); setChQ(ch.q||""); setChA(ch.a||""); setChExp(ch.exp||""); setChBonus(String(ch.bonus||"")); setChTimeSec(String(ch.timeSec||60)); setChImg(ch.img||""); setEditId(ch.id); }
-      function cancelEdit(){ setEditId(null); setChQ(""); setChA(""); setChExp(""); setChBonus(""); setChTimeSec(""); setChImg(""); setErr(""); }
+        clearChForm(); }
+      function startEdit(ch){ setErr(""); setChQ(ch.q||""); setChA(ch.a||""); setChExp(ch.exp||""); setChBonus(String(ch.bonus||"")); setChTimeSec(String(ch.timeSec||60)); setChImg(ch.img||""); setChHint(ch.hint||""); setChHintCost(ch.hint?String(ch.hintCost==null?5:ch.hintCost):""); setChKidHints({...(ch.kidHints||{})}); setEditId(ch.id); }
+      function cancelEdit(){ setEditId(null); clearChForm(); setErr(""); }
       function importChallengeJSON(file){ setErr("");
         const reader=new FileReader();
         reader.onload=(e)=>{ try{
@@ -455,10 +469,15 @@
           const bonus=pick("bonus","בונוס");
           const timeSec=pick("timeSec","timeLimitSeconds","time","זמן");
           const img=pick("img","image","תמונה");
+          const hint=pick("hint","רמז","generalHint");
+          const hintCost=pick("hintCost","hint_cost","מחיר רמז","מחיר_רמז");
+          const khRaw=pick("kidHints","secretHints","רמזים אישיים","רמזים_אישיים","רמזים סודיים");
+          const kh={}; if(khRaw && typeof khRaw==="object"){ for(const [key,val] of Object.entries(khRaw)){ const k=KIDS.find(x=>x.id===key||x.name===String(key).trim()); if(k && String(val||"").trim()) kh[k.id]=String(val).trim(); } }
           if(!String(q).trim()) return setErr("ב-JSON חסרה שאלה (q)");
           if(!String(a).trim()) return setErr("ב-JSON חסרה תשובה (a)");
           setChQ(String(q).trim()); setChA(String(a).trim()); setChExp(String(exp).trim());
           setChBonus(bonus===""?"":String(bonus)); setChTimeSec(timeSec===""?"":String(timeSec));
+          setChHint(String(hint).trim()); setChHintCost(hintCost===""?"":String(hintCost)); setChKidHints(kh);
           // תמונה נטענת רק אם זו data:image (לא שם קובץ כמו lion.png)
           if(typeof img==="string" && img.indexOf("data:image")===0){ setChImg(img); setErr("✅ אתגר ותמונה נטענו מהקובץ — בדקו ולחצו 'פרסם אתגר'"); }
           else setErr("✅ אתגר נטען מהקובץ — בדקו ולחצו 'פרסם אתגר' (תמונה: העלו דרך '📷 הוסף תמונה')");
@@ -501,7 +520,7 @@
         if(t.t==="add"){
           const td=(p.totalDeposited==null?computeDeposited(p):p.totalDeposited);
           const counted = txCounts(t);
-          if(counted){ const ntd=Math.max(0,td-t.amount); np.totalDeposited=ntd; np.depositMilestone=Math.min(1000,Math.floor(ntd/100)*100); }
+          if(counted){ const ntd=Math.max(0,td-t.amount); np.totalDeposited=ntd; np.depositMilestone=(p.depositMilestone!=null?p.depositMilestone:Math.min(1000,Math.floor(td/100)*100)); } // היעד ששולם נשאר — כדי שאותו בונוס לא ישולם פעמיים
           else { np.totalDeposited=td; }
         }
         np.tx=tx.filter((_,i)=>i!==idx);
@@ -535,12 +554,30 @@
         s=withLevelNotif(s,name,p.balance,np.balance);
         writeProfile(kidId,np); writeSettings(s);
         setMbAmt(e=>({...e,[chId]:""})); }
-      function startChallenge(ch){ setChCur(ch); setChAns(""); setChTime(ch.timeSec||60); setChOpen(true); }
+      function startChallenge(ch){ const used=((ch.hintsUsed||{})[activeId])||{};
+        setHintShown({general:!!used.general, secret:!!used.secret}); setHintErr("");
+        setChCur(ch); setChAns(""); setChTime(ch.timeSec||60); setChOpen(true); }
+      function revealHint(kind){ const cur=chCur; if(!cur) return; setHintErr("");
+        const all=settingsRef.current.challenges||[]; const ch=all.find(c=>c.id===cur.id)||cur;
+        const used=((ch.hintsUsed||{})[activeId])||{}; const name=nameOf(activeId);
+        const cost=kind==="general"?(Number(ch.hintCost)||0):0;
+        if(isTestId(activeId)){ setHintShown(h=>({...h,[kind]:true})); if(cost>0) setHintErr("🧪 בדיקה — לא חויב "+fmt(cost)); return; }
+        let charged=0;
+        if(kind==="general" && cost>0 && !used.general){
+          const p=getProfile(activeId);
+          if(p.balance<cost){ setHintErr("אין מספיק כסף ביתרה כדי לקנות את הרמז"); return; }
+          if(!window.confirm("הרמז עולה "+fmt(cost)+" ויירד מהיתרה גם אם התשובה לא תהיה נכונה. לפתוח?")) return;
+          writeProfile(activeId,{...p,balance:p.balance-cost,tx:[{t:"spend",amount:cost,reason:"💡 קניית רמז באתגר",date:Date.now()},...(p.tx||[])]});
+          charged=cost; }
+        const list=all.map(c=>c.id===ch.id?{...c,hintsUsed:{...(c.hintsUsed||{}),[activeId]:{...used,[kind]:true,...(charged?{paid:charged}:{})}}}:c);
+        let s={...settingsRef.current, challenges:list};
+        if(charged) s=addNotif(s,"💡 "+name+" קנה/תה רמז באתגר ב־"+fmt(charged),[activeId]);
+        writeSettings(s); setHintShown(h=>({...h,[kind]:true})); }
       function openPreview(){ setErr("");
         if(!chQ.trim()) return setErr("נא להזין שאלה");
         if(!chA.trim()) return setErr("נא להזין תשובה");
-        setPvAns(""); setPvResult(null);
-        setPreview({q:chQ.trim(),a:chA.trim(),exp:chExp.trim(),bonus:parseFloat(chBonus)||0,timeSec:(chTimeSec.trim()===""?60:parseInt(chTimeSec)),img:chImg||""}); }
+        setPvAns(""); setPvResult(null); setPvHint({});
+        setPreview({q:chQ.trim(),a:chA.trim(),exp:chExp.trim(),bonus:parseFloat(chBonus)||0,timeSec:(chTimeSec.trim()===""?60:parseInt(chTimeSec)),img:chImg||"",...hintFields()}); }
       function checkPreview(){ const stored=norm(preview.a); const short=norm(String(preview.a).split("(")[0]);
         const ok=norm(pvAns)===stored || (!!short && norm(pvAns)===short);
         setPvResult({ok, correct:preview.a, exp:preview.exp}); }
@@ -559,7 +596,7 @@
         let s={...settingsRef.current, challenges:list}; if(settingsRef.current.challenge) s.challenge=null;
         if(ok){ const p=getProfile(activeId);
           const np={...p,balance:p.balance+ch.bonus,challengeWins:(p.challengeWins||0)+1,tx:[{t:"add",amount:ch.bonus,reason:"🎯 זכייה באתגר!",dep:true,date:Date.now()},...p.tx]};
-          const m=awardMilestones(np,ch.bonus); const wb=awardWinsBonus(np);
+          const wb=awardWinsBonus(np); const m=awardMilestones(np,ch.bonus+wb);
           s=addNotif(s,"🎉 "+name+" פתר/ה אתגר וזכה/תה ב־"+fmt(ch.bonus)+"! (סה\"כ "+np.challengeWins+" נכונות)");
           if(m) s=addNotif(s,"🎯 "+name+" קיבל/ה בונוס יעד חיסכון!");
           if(wb) s=addNotif(s,"🏅 "+name+" הגיע/ה ל-"+np.challengeBonusPaid+" תשובות נכונות וקיבל/ה "+fmt(WINS_BONUS)+"!");
@@ -568,7 +605,7 @@
           setCelebrate("תשובה נכונה! +"+fmt(ch.bonus)); setTimeout(()=>setCelebrate(null),2600);
         } else { s=addNotif(s,"🎯 "+name+" ניסה/תה אתגר — לא הפעם 🙂"); }
         writeSettings(s);
-        setChResult({ok, correct:ch.a, exp:ch.exp||"", bonus:ch.bonus, wins:(getProfile(activeId).challengeWins||0)+(ok?1:0)}); setChCur(null); }
+        setChResult({ok, correct:ch.a, exp:ch.exp||"", bonus:ch.bonus, wins:(getProfile(activeId).challengeWins||0)}); setChCur(null); }
       useEffect(()=>{ if(!chOpen) return;
         if(chTime<=0){ finishChallenge(chAns); return; }
         const t=setTimeout(()=>setChTime(s=>s-1),1000); return ()=>clearTimeout(t); },[chOpen,chTime]);
@@ -578,6 +615,7 @@
       return (<div dir="rtl" className="min-h-screen w-full px-4 py-8 sm:px-6">
         <div className="fixed inset-0 -z-10" style={{background:THEME_BG[theme]}}></div>
 
+        {saveErr && (<div className="fixed inset-x-0 top-0 z-50 mx-auto max-w-xl p-2"><div onClick={()=>setSaveErr("")} className="rounded-2xl bg-rose-600 px-4 py-3 text-center text-sm font-bold text-white shadow-lg">{saveErr}<div className="text-[11px] font-medium opacity-90">לחצו לסגירה · שלחו צילום מסך לאמא</div></div></div>)}
         {celebrate && (<div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"><div className="pop rounded-3xl bg-white/95 px-8 py-6 text-center shadow-2xl"><div className="text-5xl">🎉</div><div className="mt-2 text-2xl font-black text-emerald-900">{celebrate}</div></div></div>)}
 
         {view==="home" && (<>
@@ -631,7 +669,7 @@
               <div className="mt-3"><Jar pct={pct}/><div className="text-xs text-emerald-500">{next?("עוד "+fmt(next-p.balance)+" לרמה הבאה"):"הצנצנת מלאה! 👑"}</div></div>
               {p.weeklyAllowance>0 && <div className="mt-3 text-sm font-medium text-emerald-600">💸 דמי כיס: {fmt(p.weeklyAllowance)} מתווספים אוטומטית כל יום א'</div>}
               <div className="mt-2 text-sm font-bold text-amber-600">🏅 תשובות נכונות: {wins} <span className="font-medium text-emerald-500">· עוד {toNextBonus} ל{fmt(WINS_BONUS)} בונוס</span></div>
-              {(()=>{ const td=(p.totalDeposited==null?computeDeposited(p):p.totalDeposited); const dm=p.depositMilestone||Math.floor(td/100)*100; const toNext=dm>=1000?0:(dm+100-td);
+              {(()=>{ const td=(p.totalDeposited==null?computeDeposited(p):p.totalDeposited); const dm=p.depositMilestone||Math.floor(td/100)*100; const toNext=dm>=1000?0:Math.max(0,dm+100-td);
                 return (<div className="mt-1 text-sm font-bold text-emerald-700">💰 סה"כ נצבר: {fmt(td)} {dm<1000 && <span className="font-medium text-emerald-500">· עוד {fmt(toNext)} לבונוס הבא</span>}</div>); })()}
               <div className="mt-5 grid grid-cols-3 gap-2">
                 <button onClick={()=>requireUnlock(activeId,()=>{setErr("");setAmount("");setReason("");setSpending(true);})} className="rounded-2xl bg-emerald-900 py-3 text-sm font-bold text-white hover:bg-emerald-800">השתמש</button>
@@ -709,6 +747,9 @@
                 <div className="text-sm text-emerald-800"><b>שאלה:</b> {c.q}</div>
                 <div className="text-sm text-emerald-800"><b>תשובה:</b> {c.a} · <b>בונוס:</b> {fmt(c.bonus)} · <b>זמן:</b> {timeLabel(c.timeSec)}</div>
                 {c.exp && <div className="text-sm text-emerald-600"><b>הסבר:</b> {c.exp}</div>}
+                {c.hint && <div className="text-sm text-amber-700"><b>💡 רמז:</b> {c.hint} · {(Number(c.hintCost)||0)>0?fmt(c.hintCost):"חינם"}</div>}
+                {c.kidHints && Object.keys(c.kidHints).length>0 && <div className="text-xs text-violet-700"><b>🤫 סודיים:</b> {Object.entries(c.kidHints).map(([id,h])=>nameOf(id)+": "+h).join(" · ")}</div>}
+                {c.hintsUsed && Object.keys(c.hintsUsed).length>0 && <div className="text-xs text-emerald-700"><b>רמזים שנפתחו:</b> {Object.entries(c.hintsUsed).map(([id,u])=>nameOf(id)+" "+[u.secret?"🤫":"",u.general?("💡"+(u.paid?(" "+fmt(u.paid)):"")):""].join("")).join(" · ")}</div>}
                 <div className="mt-1 text-xs font-semibold text-emerald-700">מי ענה:</div>
                 {Object.keys(c.attempts||{}).length===0 ? <div className="text-xs text-emerald-500">עדיין אף אחד</div> :
                   (<ul className="text-xs text-emerald-800 space-y-1">{Object.entries(c.attempts).map(([id,at])=>(<li key={id} className="flex items-center gap-2"><span>{nameOf(id)} — {at.ok?"✅ זכה/תה":"❌ לא הצליח/ה"}{at.ans?(" · ענה/תה: \""+at.ans+"\""):""}</span><button onClick={()=>resetAttempt(c.id,id)} className="rounded-lg border-2 border-emerald-200 px-2 py-0.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-50">🔄 אפס ניסיון</button></li>))}</ul>)}
@@ -758,6 +799,16 @@
               <input value={chQ} onChange={(e)=>setChQ(e.target.value)} placeholder="שאלה (למשל: כמה זה 7×8?)" className="w-full rounded-xl border-2 border-emerald-100 p-2 text-right outline-none focus:border-amber-300"/>
               <input value={chA} onChange={(e)=>setChA(e.target.value)} placeholder="התשובה הנכונה (רק התשובה, בלי הסבר)" className="w-full rounded-xl border-2 border-emerald-100 p-2 text-right outline-none focus:border-amber-300"/>
               <input value={chExp} onChange={(e)=>setChExp(e.target.value)} placeholder="הסבר / דרך פתרון (יוצג לילד אחרי שעונה)" className="w-full rounded-xl border-2 border-emerald-100 p-2 text-right outline-none focus:border-amber-300"/>
+              <input value={chHint} onChange={(e)=>setChHint(e.target.value)} placeholder="💡 רמז כללי (לא חובה) — כל ילד יכול לפתוח" className="w-full rounded-xl border-2 border-amber-200 p-2 text-right outline-none focus:border-amber-300"/>
+              {chHint.trim() && <input type="number" value={chHintCost} onChange={(e)=>setChHintCost(e.target.value)} placeholder="מחיר הרמז ב-₪ (ריק = 5, 0 = חינם)" className="w-full rounded-xl border-2 border-amber-200 p-2 text-right outline-none focus:border-amber-300"/>}
+              {chHint.trim() && <div className="text-[11px] text-amber-600">{(()=>{ const c=chHintCost.trim()===""?5:parseFloat(chHintCost); return (c>0)?("הרמז יעלה "+fmt(c)+" ויירד מהיתרה גם אם הילד לא יצליח"):"הרמז יהיה חינם"; })()}</div>}
+              <details className="rounded-xl border-2 border-violet-200 bg-violet-50/60 p-2" open={Object.values(chKidHints).some(v=>String(v||"").trim())}>
+                <summary className="cursor-pointer text-sm font-bold text-violet-700">🤫 רמזים סודיים אישיים (לא חובה, חינם)</summary>
+                <div className="mt-2 space-y-1.5">
+                  {KIDS.map(k=>(<input key={k.id} value={chKidHints[k.id]||""} onChange={(e)=>setChKidHints(o=>({...o,[k.id]:e.target.value}))} placeholder={"רמז רק ל"+k.name} className="w-full rounded-lg border-2 border-violet-100 p-1.5 text-right text-sm outline-none focus:border-violet-300"/>))}
+                  <div className="text-[11px] text-violet-600">כל ילד יראה רק את הרמז שלו, ויחליט בעצמו אם לפתוח אותו.</div>
+                </div>
+              </details>
               <input type="number" value={chBonus} onChange={(e)=>setChBonus(e.target.value)} placeholder="בונוס בש''ח למי שצודק" className="w-full rounded-xl border-2 border-emerald-100 p-2 text-right outline-none focus:border-amber-300"/>
               <input type="number" value={chTimeSec} onChange={(e)=>setChTimeSec(e.target.value)} placeholder="זמן לענות בשניות (ריק = 60 שניות)" className="w-full rounded-xl border-2 border-emerald-100 p-2 text-right outline-none focus:border-amber-300"/>
               <div className="flex items-center gap-2">
@@ -849,6 +900,17 @@
             <div className="sticky top-0 z-10 -mx-6 -mt-6 rounded-t-3xl bg-white px-6 pt-4 pb-1 text-center text-4xl font-black text-amber-500">{chTime}</div>
             {chCur.img && <img src={chCur.img} alt="" className="mx-auto mt-2 max-h-56 rounded-xl border-2 border-emerald-100 object-contain"/>}
             <h2 className={"mt-2 text-center font-black text-emerald-900 whitespace-pre-wrap "+(chCur.q.length>120?"text-base leading-relaxed":"text-xl")}>🎯 {chCur.q}</h2>
+            {(()=>{ const sec=(chCur.kidHints||{})[activeId]; const gen=chCur.hint; const cost=Number(chCur.hintCost)||0;
+              if(!sec && !gen) return null;
+              return (<div className="mt-3 space-y-2">
+                {sec && (hintShown.secret
+                  ? <div className="rounded-2xl border-2 border-violet-200 bg-violet-50 p-3 text-right text-sm text-violet-900 whitespace-pre-wrap"><b>🤫 רמז סודי רק בשבילך:</b> {sec}</div>
+                  : <button onClick={()=>revealHint("secret")} className="w-full rounded-2xl border-2 border-violet-300 bg-violet-50 py-2 text-sm font-bold text-violet-700">🤫 יש לך רמז סודי! לפתוח? (חינם)</button>)}
+                {gen && (hintShown.general
+                  ? <div className="rounded-2xl border-2 border-amber-200 bg-amber-50 p-3 text-right text-sm text-amber-900 whitespace-pre-wrap"><b>💡 רמז:</b> {gen}</div>
+                  : <button onClick={()=>revealHint("general")} className="w-full rounded-2xl border-2 border-amber-300 bg-amber-50 py-2 text-sm font-bold text-amber-700">💡 קבל רמז {cost>0?("— עולה "+fmt(cost)+" מהיתרה"):"— חינם"}</button>)}
+                {hintErr && <div className="text-center text-xs font-semibold text-rose-500">{hintErr}</div>}
+              </div>); })()}
             <input value={chAns} onChange={(e)=>setChAns(e.target.value)} onKeyDown={(e)=>{ if(e.key==="Enter") finishChallenge(chAns); }} className="mt-4 w-full rounded-2xl border-2 border-emerald-100 p-3 text-right outline-none focus:border-amber-300" placeholder="התשובה שלך…"/>
             <button onClick={()=>finishChallenge(chAns)} className="mt-4 w-full rounded-2xl bg-emerald-900 py-3 font-bold text-white hover:bg-emerald-800">שלח תשובה</button>
             <button onClick={()=>finishChallenge(chAns)} className="mt-2 w-full rounded-2xl py-2 font-semibold text-emerald-600">✖ סגור (נחשב כניסיון)</button>
@@ -874,6 +936,13 @@
               <div className="mt-3 text-center text-3xl font-black text-amber-500">⏱ {preview.timeSec}s</div>
               {preview.img && <img src={preview.img} alt="" className="mx-auto mt-2 max-h-56 rounded-xl border-2 border-emerald-100 object-contain"/>}
               <h2 className={"mt-2 text-center font-black text-emerald-900 whitespace-pre-wrap "+(preview.q.length>120?"text-base leading-relaxed":"text-xl")}>🎯 {preview.q}</h2>
+              {preview.hint && (pvHint.general
+                ? <div className="mt-3 rounded-2xl border-2 border-amber-200 bg-amber-50 p-3 text-right text-sm text-amber-900"><b>💡 רמז:</b> {preview.hint}</div>
+                : <button onClick={()=>setPvHint(h=>({...h,general:true}))} className="mt-3 w-full rounded-2xl border-2 border-amber-300 bg-amber-50 py-2 text-sm font-bold text-amber-700">💡 קבל רמז {preview.hintCost>0?("— עולה "+fmt(preview.hintCost)+" מהיתרה"):"— חינם"}</button>)}
+              {Object.keys(preview.kidHints||{}).length>0 && (<div className="mt-3 rounded-2xl border-2 border-violet-200 bg-violet-50 p-3 text-right text-xs text-violet-900">
+                <div className="font-bold">🤫 רמזים סודיים (כל ילד רואה רק את שלו):</div>
+                {Object.entries(preview.kidHints).map(([id,h])=>(<div key={id} className="mt-1"><b>{nameOf(id)}:</b> {h}</div>))}
+              </div>)}
               <input value={pvAns} onChange={(e)=>setPvAns(e.target.value)} onKeyDown={(e)=>{ if(e.key==="Enter") checkPreview(); }} className="mt-4 w-full rounded-2xl border-2 border-emerald-100 p-3 text-right outline-none focus:border-amber-300" placeholder="כתבי תשובה לבדיקה…"/>
               <button onClick={checkPreview} className="mt-4 w-full rounded-2xl bg-emerald-900 py-3 font-bold text-white hover:bg-emerald-800">בדוק תשובה</button>
             </>) : (<>
